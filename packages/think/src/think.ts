@@ -12603,9 +12603,11 @@ export class Think<
     }
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
-    const streamId = this._startResumableStream(requestId);
-    const continuation = options?.continuation ?? false;
     const parentId = options?.parentId;
+    const streamId = this._startResumableStream(requestId, {
+      parentMessageId: parentId
+    });
+    const continuation = options?.continuation ?? false;
 
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
@@ -15826,7 +15828,10 @@ export class Think<
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => this._pendingChatTerminal(),
       persistOrphanedStream: (streamId) =>
-        this._persistOrphanedStream(streamId, this._activeTurnHistory?.leafId),
+        this._persistOrphanedStream(
+          streamId,
+          this._resumableStream.getStreamParentMessageId(streamId) ?? undefined
+        ),
       isConnectionPresent: (connectionId) =>
         this.getConnection(connectionId) !== undefined
     }));
@@ -15858,7 +15863,7 @@ export class Think<
    */
   protected _startResumableStream(
     requestId: string,
-    options?: { messageId?: string }
+    options?: { messageId?: string; parentMessageId?: string }
   ): string {
     const streamId = this._resumableStream.start(requestId, options);
     // Flush connections parked during this turn's pre-stream window (#1784)
