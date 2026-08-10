@@ -39,6 +39,11 @@ export type DeliveryResult =
 
 /** A configured outbound delivery route. */
 export interface Channel {
+  /**
+   * Whether this route can currently be selected without attempting delivery.
+   * Absence means the channel should be attempted.
+   */
+  isAvailable?(): boolean | Promise<boolean>;
   deliver(message: ChannelMessage): Promise<DeliveryResult>;
 }
 
