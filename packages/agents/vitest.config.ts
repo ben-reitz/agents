@@ -8,6 +8,7 @@ export default defineConfig({
       "src/cli-tests/vitest.config.ts",
       "src/x402-tests/vitest.config.ts",
       "src/chat/__tests__/vitest.config.ts",
+      "src/experimental/channels/__tests__/vitest.config.ts",
       "src/webmcp-tests/vitest.config.ts"
       // "src/e2e-tests/vitest.config.ts" — excluded from the default unit target
       //   (spawns real `wrangler dev` + SIGKILL); runs nightly via the `e2e-agents`
