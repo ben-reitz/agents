@@ -50,14 +50,15 @@ export interface Channel {
 type ChannelTool = Tool<ChannelMessage, DeliveryResult>;
 
 /** Model-facing options controlled by the caller creating the tool. */
-export type CreateChannelToolOptions = {
-  description?: string;
-  inputExamples?: Array<{ input: ChannelMessage }>;
-  metadata?: ChannelTool["metadata"];
-  needsApproval?: ChannelTool["needsApproval"];
-  providerOptions?: ChannelTool["providerOptions"];
-  strict?: boolean;
-};
+export type CreateChannelToolOptions = Pick<
+  ChannelTool,
+  | "description"
+  | "inputExamples"
+  | "metadata"
+  | "needsApproval"
+  | "providerOptions"
+  | "strict"
+>;
 
 const channelMessageSchema = z.object({
   title: z

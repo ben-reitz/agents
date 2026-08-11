@@ -72,6 +72,13 @@ export type {
   TranscriberSessionOptions
 } from "./types";
 
+// Re-export output-only browser voice channel
+export { browserVoice } from "./channels/browser-voice";
+export type {
+  BrowserVoiceChannelOptions,
+  BrowserVoiceConnection
+} from "./channels/browser-voice";
+
 // Re-export voice input mixin (STT-only, no TTS/LLM)
 export { withVoiceInput } from "./voice-input";
 

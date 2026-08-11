@@ -101,6 +101,46 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
 - `saveMessage(role, content)` -- persist a message to conversation history
 - `getConversationHistory()` -- retrieve conversation history from SQLite
 
+## Server: output-only browser voice channel
+
+Use `browserVoice()` when an agent only needs to deliver synthesized speech to
+a browser. It accepts any `TTSProvider`, uses the Voice client protocol for
+audio playback, and does not require `withVoice()`, a microphone, or an STT
+provider.
+
+```typescript
+import { Agent, type Connection, type ConnectionContext } from "agents";
+import { WorkersAITTS, browserVoice } from "@cloudflare/voice";
+
+class MyAgent extends Agent<Env> {
+  getConnectionTags(_connection: Connection, ctx: ConnectionContext): string[] {
+    return new URL(ctx.request.url).searchParams.get("surface") === "voice"
+      ? ["browser-voice"]
+      : [];
+  }
+
+  voiceChannel() {
+    return browserVoice({
+      tts: new WorkersAITTS(this.env.AI),
+      getConnection: () => [...this.getConnections("browser-voice")][0]
+    });
+  }
+}
+```
+
+Connect the tagged browser surface with `VoiceClient` or `useVoiceAgent()`:
+
+```tsx
+const voice = useVoiceAgent({
+  agent: "my-agent",
+  name: agentName,
+  query: { surface: "voice" }
+});
+```
+
+The default audio format is MP3; providers that return another format must set
+`audioFormat` and, for raw PCM, `sampleRate`.
+
 ## Server: voice input only (`withVoiceInput`)
 
 STT-only mixin -- no TTS, no LLM. Use when you only need speech-to-text (e.g., dictation, transcription).
