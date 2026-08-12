@@ -19,8 +19,9 @@ export type DeliveryFailure = {
  * The result of a direct delivery attempt.
  *
  * `delivered` means the transport accepted the message, not that a person read
- * it. A caller should retry only `failed` results marked as retryable.
- * `uncertain` means retrying could produce a duplicate.
+ * it. `failed` means the transport confirmed that no delivery occurred; its
+ * `retryable` field says whether the same route can be attempted again.
+ * `uncertain` means another attempt or route could produce a duplicate.
  */
 export type DeliveryResult =
   | {

@@ -10,10 +10,11 @@ async function isAvailable(channel: Channel): Promise<boolean> {
 /**
  * Compose channels in preference order, selecting the first available route.
  *
- * Once delivery is attempted on a channel, its result is final. Falling back
- * after an attempt could duplicate a delivery whose outcome is uncertain. The
- * final channel is always attempted so the composition produces a delivery
- * result even when every route reports unavailable.
+ * A definitive `failed` result advances to the next channel because the
+ * transport confirmed that no delivery occurred. A `delivered` or `uncertain`
+ * result is final so fallback cannot duplicate a delivery. The final channel is
+ * always attempted so the composition produces a delivery result even when
+ * every route reports unavailable.
  */
 export function fallback(channels: FallbackChannelOptions): Channel {
   return {
@@ -28,7 +29,8 @@ export function fallback(channels: FallbackChannelOptions): Channel {
       for (let index = 0; index < channels.length - 1; index += 1) {
         const channel = channels[index];
         if (channel && (await isAvailable(channel))) {
-          return channel.deliver(message);
+          const result = await channel.deliver(message);
+          if (result.status !== "failed") return result;
         }
       }
 

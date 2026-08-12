@@ -59,21 +59,29 @@ describe("experimental fallback channel", () => {
     expect(third.deliver).not.toHaveBeenCalled();
   });
 
-  it("does not switch transports after an available channel fails", async () => {
-    const failure: DeliveryResult = {
-      status: "failed",
-      retryable: true,
-      error: { code: "BROWSER_VOICE_CONNECTION_CLOSED", message: "Closed" }
-    };
-    const first = channel(failure, true);
-    const second = channel({ status: "delivered", reference: "email-1" });
-    const compound = fallback([first, second]);
+  it.each([true, false])(
+    "uses the next channel after a definitive failure (retryable: %s)",
+    async (retryable) => {
+      const first = channel(
+        {
+          status: "failed",
+          retryable,
+          error: { code: "DELIVERY_FAILED", message: "Not delivered" }
+        },
+        true
+      );
+      const second = channel({ status: "delivered", reference: "email-1" });
+      const compound = fallback([first, second]);
+      const message = { markdown: "Hello" };
 
-    await expect(compound.deliver({ markdown: "Hello" })).resolves.toEqual(
-      failure
-    );
-    expect(second.deliver).not.toHaveBeenCalled();
-  });
+      await expect(compound.deliver(message)).resolves.toEqual({
+        status: "delivered",
+        reference: "email-1"
+      });
+      expect(first.deliver).toHaveBeenCalledWith(message);
+      expect(second.deliver).toHaveBeenCalledWith(message);
+    }
+  );
 
   it("does not inspect later channels when an earlier one is available", async () => {
     const first = channel({ status: "delivered", reference: "voice-1" }, true);
@@ -93,7 +101,7 @@ describe("experimental fallback channel", () => {
     await expect(compound.isAvailable?.()).resolves.toBe(true);
   });
 
-  it("attempts a channel that does not expose availability", async () => {
+  it("stops after an uncertain delivery outcome", async () => {
     const first = channel({
       status: "uncertain",
       error: { code: "DELIVERY_ERROR", message: "Unknown outcome" }
