@@ -244,6 +244,7 @@ import type {
   ChatFiberSnapshot,
   OrphanPersistStore
 } from "agents/chat";
+import { ChannelHost, type Channel } from "agents/experimental/channels";
 import { Session } from "agents/experimental/memory/session";
 import type { SessionMessage } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
@@ -1398,6 +1399,12 @@ export interface PendingApproval {
   source: "action" | "codemode";
   descriptor: ActionApprovalDescriptor;
 }
+
+/** Channels and initial routing used to construct this Think Agent's Host. */
+export type ThinkChannelHostConfig = {
+  channels: Record<string, Channel>;
+  approvalRequests?: string;
+};
 
 export interface ActionConfig<
   InputSchema extends FlexibleSchema = FlexibleSchema,
@@ -2825,6 +2832,9 @@ export class Think<
 
   private _messengerRuntime?: ThinkMessengerRuntime;
 
+  /** Central runtime for typed Channel delivery and ingress. */
+  channelHost!: ChannelHost;
+
   /** Resolved channel registry (implicit web + configureChannels + messengers). */
   private _channels?: Map<string, NormalizedChannelDefinition>;
 
@@ -3011,6 +3021,7 @@ export class Think<
           this._resumableStream = new ResumableStream(this.sql.bind(this));
           this._restoreClientTools();
           this._restoreBody();
+          await this._initializeChannelHost();
           this._setupProtocolHandlers();
           await this._initializeChannels();
         }
@@ -4095,6 +4106,25 @@ export class Think<
     return {};
   }
 
+  /**
+   * Return the Channels owned by this Agent's Host and their initial approval
+   * route. Think initializes the Host before {@link onStart} and mounts all
+   * Channel ingress internally.
+   */
+  configureChannelHost():
+    | ThinkChannelHostConfig
+    | Promise<ThinkChannelHostConfig> {
+    return { channels: {} };
+  }
+
+  /** Dynamically select the Channel used for subsequent approval requests. */
+  setApprovalRequestsChannel(channelId?: string): void {
+    if (!this.channelHost) {
+      throw new Error("ChannelHost is not initialized yet");
+    }
+    this.channelHost.setApprovalRequestsChannel(channelId);
+  }
+
   getMessengerContext(): MessengerContext | undefined {
     if (this._activeMessengerContext) {
       return this._activeMessengerContext;
@@ -4379,6 +4409,24 @@ export class Think<
       parts: [{ type: "text", text }],
       metadata: { deliveryKind: kind }
     };
+  }
+
+  private async _initializeChannelHost(): Promise<void> {
+    const configured = await this.configureChannelHost();
+    this.channelHost = new ChannelHost({
+      channels: configured.channels,
+      onApprovalResponse: async ({ interactionId, decision, channelId }) => {
+        if (decision === "approve") {
+          await this.approveExecution(interactionId);
+        } else {
+          await this.rejectExecution(
+            interactionId,
+            `Rejected through ${channelId}`
+          );
+        }
+      }
+    });
+    this.channelHost.setApprovalRequestsChannel(configured.approvalRequests);
   }
 
   private async _initializeChannels(): Promise<void> {
@@ -4686,6 +4734,10 @@ export class Think<
     ActionApprovalDescriptor
   >();
   private _activeTurnApprovedActionInputs = new Map<string, unknown>();
+  private _pendingActionApprovalNotifications = new Map<
+    string,
+    PendingApproval
+  >();
   private _activeActionLedgerExecutions = new Map<string, Promise<unknown>>();
   /**
    * Advisory reply attachments recorded by actions during the current admitted
@@ -4919,6 +4971,14 @@ export class Think<
   ): Partial<ActionApprovalDescriptor> | undefined {
     return undefined;
   }
+
+  /**
+   * Called after a durable-pause Action and its paused assistant output are
+   * persisted for human approval. Override this to notify an out-of-band
+   * approval surface. Notification
+   * failures are logged and leave the authoritative pending approval intact.
+   */
+  onActionApprovalRequest(_approval: PendingApproval): void | Promise<void> {}
 
   /**
    * Called before each AI SDK step in the agentic loop. Backed by
@@ -6575,6 +6635,11 @@ export class Think<
       type: "action:pause:created",
       payload: { action: toolName, executionId, toolCallId: ctx.toolCallId }
     });
+    this._pendingActionApprovalNotifications.set(executionId, {
+      executionId,
+      source: "action",
+      descriptor
+    });
     return {
       status: "paused",
       executionId,
@@ -6583,6 +6648,61 @@ export class Think<
         "This action is awaiting human approval. Stop and wait for the " +
         "approval result before proceeding."
     };
+  }
+
+  /**
+   * Notify only after the paused tool output is present in the persisted
+   * assistant message. This prevents a fast inbound decision from resolving
+   * the pending row before `_applyExecutionOutcome` can find its transcript
+   * part.
+   */
+  private async _notifyActionApprovalRequests(
+    message: UIMessage
+  ): Promise<void> {
+    const persisted = new Set<string>();
+    for (const part of message.parts) {
+      if (!("output" in part)) continue;
+      const output = part.output;
+      if (output === null || typeof output !== "object") continue;
+      const executionId = (output as { executionId?: unknown }).executionId;
+      if (typeof executionId === "string") persisted.add(executionId);
+    }
+
+    for (const executionId of persisted) {
+      const approval =
+        this._pendingActionApprovalNotifications.get(executionId);
+      if (!approval) continue;
+      this._pendingActionApprovalNotifications.delete(executionId);
+      try {
+        const delivery = await this.channelHost.requestApproval({
+          interactionId: approval.executionId,
+          request: {
+            title: "Approval required",
+            summary: approval.descriptor.summary,
+            input: approval.descriptor.input
+          }
+        });
+        if (delivery && delivery.result.status !== "delivered") {
+          console.error(
+            `[Think] Channel approval request was not delivered for "${executionId}" through "${delivery.channelId}" (${delivery.result.status}):`,
+            delivery.result.error.message
+          );
+        }
+      } catch (error) {
+        console.error(
+          `[Think] Channel approval request failed for "${executionId}":`,
+          error
+        );
+      }
+      try {
+        await this.onActionApprovalRequest(approval);
+      } catch (error) {
+        console.error(
+          `[Think] onActionApprovalRequest failed for "${executionId}":`,
+          error
+        );
+      }
+    }
   }
 
   /** Default hook timeout in milliseconds. */
@@ -11228,6 +11348,10 @@ export class Think<
       ) {
         return Response.json(this.messages);
       }
+      const channelResponse = await this.channelHost.handleRequest(request);
+      if (channelResponse) {
+        return channelResponse;
+      }
       const messengerResponse =
         await this._messengerRuntime?.handleRequest(request);
       if (messengerResponse) {
@@ -12911,6 +13035,7 @@ export class Think<
     const toPersist = this._strippedForPersist(msg);
     if (toPersist === null) return;
     await this._upsertMessageInHistory(toPersist, parentId);
+    await this._notifyActionApprovalRequests(toPersist);
   }
 
   /**
@@ -13467,6 +13592,7 @@ export class Think<
     executionId: string,
     output: unknown
   ): Promise<boolean> {
+    this._pendingActionApprovalNotifications.delete(executionId);
     const toolCallId = this._findPausedExecutionToolCall(executionId);
     if (!toolCallId) {
       // Already resolved in place (e.g. approved from another tab)? Then the

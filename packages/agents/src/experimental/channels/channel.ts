@@ -1,5 +1,6 @@
 import { tool, type Tool } from "ai";
 import { z } from "zod";
+import type { ChannelIngress } from "./ingress";
 
 /** A transport-neutral outbound message whose canonical content is Markdown. */
 export type ChannelMessage = {
@@ -38,7 +39,19 @@ export type DeliveryResult =
       error: DeliveryFailure;
     };
 
-/** A configured outbound delivery route. */
+/** The content a Channel needs to render an external approval request. */
+export type ChannelApprovalRequest = {
+  title?: string;
+  summary: string;
+  input: unknown;
+};
+
+export type ChannelApprovalRequestOptions = {
+  interactionId: string;
+  request: ChannelApprovalRequest;
+};
+
+/** A configured delivery route with optional approval and ingress support. */
 export interface Channel {
   /**
    * Whether this route can currently be selected without attempting delivery.
@@ -46,6 +59,10 @@ export interface Channel {
    */
   isAvailable?(): boolean | Promise<boolean>;
   deliver(message: ChannelMessage): Promise<DeliveryResult>;
+  requestApproval?(
+    options: ChannelApprovalRequestOptions
+  ): Promise<DeliveryResult>;
+  readonly ingress?: ChannelIngress;
 }
 
 type ChannelTool = Tool<ChannelMessage, DeliveryResult>;
