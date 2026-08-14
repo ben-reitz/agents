@@ -352,6 +352,81 @@ describe("AgentSessionProvider — tree-structured messages", () => {
     expect(compactions).toHaveLength(2);
   });
 
+  it("keeps sibling branch compaction overlays isolated", async () => {
+    const agent = await getAgent(name);
+
+    await agent.appendMessage({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "root" }]
+    });
+    await agent.appendMessage({
+      id: "m1",
+      role: "assistant",
+      parts: [{ type: "text", text: "shared" }]
+    });
+    await agent.appendMessage(
+      {
+        id: "a2",
+        role: "user",
+        parts: [{ type: "text", text: "branch A" }]
+      },
+      "m1"
+    );
+    await agent.appendMessage(
+      {
+        id: "a3",
+        role: "assistant",
+        parts: [{ type: "text", text: "branch A reply" }]
+      },
+      "a2"
+    );
+    await agent.appendMessage(
+      {
+        id: "a4",
+        role: "user",
+        parts: [{ type: "text", text: "branch A tail" }]
+      },
+      "a3"
+    );
+    await agent.appendMessage(
+      {
+        id: "b2",
+        role: "user",
+        parts: [{ type: "text", text: "branch B" }]
+      },
+      "m1"
+    );
+    await agent.appendMessage(
+      {
+        id: "b3",
+        role: "assistant",
+        parts: [{ type: "text", text: "branch B tail" }]
+      },
+      "b2"
+    );
+
+    await agent.addCompaction("Branch A summary 1", "m0", "a2");
+    await agent.addCompaction("Branch B summary", "m0", "b2");
+    await agent.addCompaction("Branch A summary 2", "m0", "a3");
+
+    const historyA = await agent.getHistory("a4");
+    expect(historyA).toHaveLength(2);
+    expect(historyA[0].parts[0]).toEqual({
+      type: "text",
+      text: "Branch A summary 2"
+    });
+    expect(historyA[1].id).toBe("a4");
+
+    const historyB = await agent.getHistory("b3");
+    expect(historyB).toHaveLength(2);
+    expect(historyB[0].parts[0]).toEqual({
+      type: "text",
+      text: "Branch B summary"
+    });
+    expect(historyB[1].id).toBe("b3");
+  });
+
   it("FTS search", async () => {
     const agent = await getAgent(name);
     await agent.appendMessage({
