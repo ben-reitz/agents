@@ -4407,6 +4407,71 @@ describe("Think — onChatRecovery", () => {
     ).toBe("Already persisted");
   });
 
+  it("{ persist: false, continue: true } retries the selected user branch", async () => {
+    const agent = await freshRecoveryAgent(
+      `skip-partial-retry-selected-branch-${crypto.randomUUID()}`
+    );
+    const requestId = "req-skip-partial-retry";
+    const userId = "user-skip-partial-retry";
+    const oldAssistantId = "assistant-old-skip-partial-retry";
+
+    await agent.setRecoveryOverride({ persist: false, continue: true });
+    await agent.persistTestMessage({
+      id: userId,
+      role: "user",
+      parts: [{ type: "text", text: "answer differently" }]
+    });
+    await agent.persistTestMessage({
+      id: oldAssistantId,
+      role: "assistant",
+      parts: [{ type: "text", text: "Old answer" }]
+    });
+    await agent.insertInterruptedStream(`stream-${requestId}`, requestId, [
+      {
+        body: JSON.stringify({
+          type: "start",
+          messageId: "assistant-dropped-partial"
+        }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Dropped partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber(`__cf_internal_chat_turn:${requestId}`, {
+      __cfThinkChatFiberSnapshot: {
+        kind: "think-chat-turn",
+        version: 1,
+        requestId,
+        continuation: false,
+        latestMessageId: userId,
+        latestMessageRole: "user",
+        latestUserMessageId: userId,
+        historyLeafId: userId,
+        activeLeafIdAtStart: oldAssistantId,
+        startedAt: Date.now()
+      },
+      user: null
+    });
+
+    await agent.triggerFiberRecovery();
+
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryRetry")
+    ).toBe(1);
+    expect(
+      await agent.getScheduledChatRecoveryCountForTest("_chatRecoveryContinue")
+    ).toBe(0);
+    expect(await agent.getTurnCallCount()).toBe(1);
+
+    const branches = (await agent.getBranchesForTest(userId)) as UIMessage[];
+    expect(branches).toHaveLength(2);
+    expect(branches.map((message) => message.id)).toContain(oldAssistantId);
+    expect(await agent.getPromptRolesForTest()).toEqual([["system", "user"]]);
+  });
+
   it("{ persist: false, continue: false } skips both", async () => {
     const agent = await freshRecoveryAgent("skip-both");
 

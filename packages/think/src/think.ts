@@ -1028,6 +1028,7 @@ type ChatRecoveryRetryData = {
 
 type ChatRecoveryContinueData = {
   targetAssistantId?: string;
+  historyLeafId?: string;
   originalRequestId?: string;
   incidentId?: string;
   lastBody?: Record<string, unknown> | null;
@@ -1042,6 +1043,10 @@ type ChatRecoveryContinueData = {
  * `streamStatus` rather than carrying it here.
  */
 type ThinkRecoveryClassification = { retryTargetUserId: string | null };
+
+type ThinkRecoveredTurnTarget =
+  | { recoveryKind: "retry"; messageId: string }
+  | { recoveryKind: "continue"; messageId?: string };
 
 // `ChatRecoveryIncident` / `ChatRecoveryKind` / `CHAT_RECOVERY_INCIDENT_KEY_PREFIX`
 // are the canonical shared symbols from `agents/chat` (imported above); the
@@ -3256,17 +3261,28 @@ export class Think<
 
     // Repair preserves every message (orphans are flipped to errored in place,
     // never deleted), so there are no removed rows to delete — only updates.
+    // `messages` may be a selected historical branch used only for inference;
+    // persist those repairs without replacing the independently-owned active
+    // transcript cache with that branch.
+    const originalById = new Map(
+      messages.map((message) => [message.id, message] as const)
+    );
+    const activeMessageIds = new Set(
+      this._cachedMessages.map((message) => message.id)
+    );
+    let activeTranscriptChanged = false;
     for (const message of repair.messages) {
-      const original = messages.find(
-        (candidate) => candidate.id === message.id
-      );
+      const original = originalById.get(message.id);
       if (original && original.parts !== message.parts) {
+        activeTranscriptChanged ||= activeMessageIds.has(message.id);
         await this.session.updateMessage(sanitizeMessage(message));
       }
     }
 
-    this._replaceCachedMessages(repair.messages);
-    this._broadcastMessages();
+    // Session update events patch matching cached rows. Broadcast only when a
+    // repaired row belongs to the live view; branch-only model history must not
+    // change what connected clients see.
+    if (activeTranscriptChanged) this._broadcastMessages();
     this._emit("chat:transcript:repaired", {
       removedToolCalls: repair.removedToolCalls,
       normalizedInputs: repair.normalizedInputs,
@@ -4298,11 +4314,6 @@ export class Think<
       !Array.isArray(turnMetadata)
       ? (turnMetadata as Record<string, unknown>)
       : undefined;
-  }
-
-  /** Re-resolve the channel for a continuation from the latest user message. */
-  private _channelFromLatestUserMessage(): string | undefined {
-    return this._channelFromMessages(this.messages);
   }
 
   /**
@@ -10989,11 +11000,20 @@ export class Think<
    */
   protected async continueLastTurn(
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions & { trigger?: TurnTrigger; channel?: string }
+    options?: SaveMessagesOptions & {
+      trigger?: TurnTrigger;
+      channel?: string;
+      history?: InferenceHistorySelection;
+    }
   ): Promise<SaveMessagesResult> {
     const trigger = options?.trigger ?? "programmatic";
     this._assertNotInsideAdmittedTurn(trigger);
-    const lastLeaf = await this.session.getLatestLeaf();
+    const continuationHistory = options?.history
+      ? await this._readMessagesFromStorage(options.history)
+      : this.messages;
+    const lastLeaf = options?.history
+      ? await this.session.getMessage(options.history.leafId)
+      : await this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "assistant") {
       return { requestId: "", status: "skipped" };
     }
@@ -11008,7 +11028,8 @@ export class Think<
     const epoch = this._turnQueue.generation;
     // Re-resolve the channel from durable history so a continued/recovered turn
     // re-applies per-channel policy.
-    const channel = options?.channel ?? this._channelFromLatestUserMessage();
+    const channel =
+      options?.channel ?? this._channelFromMessages(continuationHistory);
     let status: SaveMessagesResult["status"] = "completed";
     let error: string | undefined;
     let wasAborted = false;
@@ -11041,12 +11062,15 @@ export class Think<
                 email: undefined
               },
               () =>
-                this._runInferenceLoop({
-                  signal: abortSignal,
-                  clientTools,
-                  body: resolvedBody,
-                  continuation: true
-                })
+                this._runInferenceLoop(
+                  {
+                    signal: abortSignal,
+                    clientTools,
+                    body: resolvedBody,
+                    continuation: true
+                  },
+                  options?.history
+                )
             );
 
             if (result) {
@@ -11055,7 +11079,8 @@ export class Think<
                 result,
                 abortSignal,
                 {
-                  continuation: true
+                  continuation: true,
+                  parentId: options?.history?.leafId
                 }
               );
               status = streamResult.status;
@@ -11064,7 +11089,12 @@ export class Think<
           };
 
           if (this.chatRecovery) {
-            await this._runChatRecoveryFiber(requestId, true, continueTurnBody);
+            await this._runChatRecoveryFiber(
+              requestId,
+              true,
+              continueTurnBody,
+              options?.history
+            );
           } else {
             await continueTurnBody();
           }
@@ -14395,21 +14425,12 @@ export class Think<
       recoveryRootRequestId,
       streamStatus
     } = input;
-    const { retryTargetUserId } = input.detail;
     const streamIsTerminal =
       streamStatus === "completed" || streamStatus === "error";
-
-    const shouldRetry =
-      retryTargetUserId !== null &&
-      options.continue !== false &&
-      !streamIsTerminal;
-    const lastLeaf = shouldRetry ? null : await this.session.getLatestLeaf();
-    const targetId =
-      lastLeaf?.role === "assistant" && !streamIsTerminal
-        ? lastLeaf.id
-        : undefined;
-    const canContinue =
-      !shouldRetry && options.continue !== false && !streamIsTerminal;
+    const target =
+      options.continue !== false && !streamIsTerminal
+        ? await this._resolveThinkRecoveredTurnTarget(input)
+        : null;
     // The durable submission is keyed by the recovery ROOT request id (stable
     // across the whole continuation chain), not this turn's per-continuation
     // requestId. Keying off `requestId` loses the link on every chained
@@ -14431,20 +14452,19 @@ export class Think<
     }
 
     const recoveredRequestId =
-      (canContinue || shouldRetry) && hasRunningSubmission
-        ? recoveryRootRequestId
-        : undefined;
+      target && hasRunningSubmission ? recoveryRootRequestId : undefined;
 
-    if (shouldRetry) {
+    if (target?.recoveryKind === "retry") {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
-        recoveryKind: input.recoveryKind,
+        // A recovered stream may classify as `continue` before persistence but
+        // produce no assistant anchor (zero chunks or `persist: false`). In
+        // that case the selected user leaf must be retried instead.
+        recoveryKind: "retry",
         callback: "_chatRecoveryRetry",
         data: {
-          targetUserId: retryTargetUserId,
-          ...(snapshot?.historyLeafId
-            ? { historyLeafId: snapshot.historyLeafId }
-            : {}),
+          targetUserId: target.messageId,
+          historyLeafId: target.messageId,
           ...(snapshot?.activeLeafIdAtStart
             ? { activeLeafIdAtStart: snapshot.activeLeafIdAtStart }
             : {}),
@@ -14455,13 +14475,18 @@ export class Think<
           ...(recoveredRequestId ? { recoveredRequestId } : {})
         }
       });
-    } else if (canContinue) {
+    } else if (target?.recoveryKind === "continue") {
       await this._chatRecoveryEngine().scheduleRecovery({
         incident,
-        recoveryKind: input.recoveryKind,
+        recoveryKind: "continue",
         callback: "_chatRecoveryContinue",
         data: {
-          ...(targetId ? { targetAssistantId: targetId } : {}),
+          ...(target.messageId
+            ? {
+                targetAssistantId: target.messageId,
+                historyLeafId: target.messageId
+              }
+            : {}),
           originalRequestId: recoveryRootRequestId,
           incidentId: incident.incidentId,
           ...(snapshot
@@ -14510,6 +14535,57 @@ export class Think<
         streamIsTerminal ? "stream_terminal" : "not_recoverable"
       );
     }
+  }
+
+  /**
+   * Resolve the exact durable leaf a recovered turn should run from. A newly
+   * materialized orphan assistant takes precedence. Without one, an explicit
+   * branch snapshot retries a user leaf or continues an assistant leaf. Only
+   * legacy snapshots without branch context fall back to the global latest
+   * leaf.
+   */
+  private async _resolveThinkRecoveredTurnTarget(
+    input: DispatchRecoveredTurnInput<ThinkRecoveryClassification>
+  ): Promise<ThinkRecoveredTurnTarget | null> {
+    if (input.persistedOrphanMessageId) {
+      const persistedAssistant = await this.session.getMessage(
+        input.persistedOrphanMessageId
+      );
+      if (persistedAssistant?.role === "assistant") {
+        return {
+          recoveryKind: "continue",
+          messageId: persistedAssistant.id
+        };
+      }
+    }
+
+    if (input.snapshot?.historyLeafId) {
+      const selectedLeaf = await this.session.getMessage(
+        input.snapshot.historyLeafId
+      );
+      if (selectedLeaf?.role === "user") {
+        return { recoveryKind: "retry", messageId: selectedLeaf.id };
+      }
+      if (selectedLeaf?.role === "assistant") {
+        return { recoveryKind: "continue", messageId: selectedLeaf.id };
+      }
+      return null;
+    }
+
+    if (input.detail.retryTargetUserId) {
+      return {
+        recoveryKind: "retry",
+        messageId: input.detail.retryTargetUserId
+      };
+    }
+
+    const legacyLatestLeaf = await this.session.getLatestLeaf();
+    return {
+      recoveryKind: "continue",
+      ...(legacyLatestLeaf?.role === "assistant"
+        ? { messageId: legacyLatestLeaf.id }
+        : {})
+    };
   }
 
   private async _recoverablePreStreamUserId(
@@ -15255,12 +15331,14 @@ export class Think<
       }
 
       this._applyRecoveredRequestContext(data);
-      const result = await this.continueLastTurn(
-        undefined,
-        controller
-          ? { signal: controller.signal, trigger: "recovery-continue" }
-          : { trigger: "recovery-continue" }
-      );
+      const history = data?.historyLeafId
+        ? { leafId: data.historyLeafId }
+        : undefined;
+      const result = await this.continueLastTurn(undefined, {
+        ...(controller ? { signal: controller.signal } : {}),
+        trigger: "recovery-continue",
+        ...(history ? { history } : {})
+      });
       await this._updateChatRecoveryIncident(
         data?.incidentId,
         result.status === "completed"
@@ -15825,8 +15903,12 @@ export class Think<
       preStream: this._preStream,
       pendingResumeConnections: this._pendingResumeConnections,
       pendingChatTerminal: () => this._pendingChatTerminal(),
-      persistOrphanedStream: (streamId) =>
-        this._persistOrphanedStream(streamId, this._activeTurnHistory?.leafId),
+      persistOrphanedStream: async (streamId) => {
+        await this._persistOrphanedStream(
+          streamId,
+          this._activeTurnHistory?.leafId
+        );
+      },
       isConnectionPresent: (connectionId) =>
         this.getConnection(connectionId) !== undefined
     }));
@@ -15923,10 +16005,10 @@ export class Think<
   private async _persistOrphanedStream(
     streamId: string,
     parentId?: string
-  ): Promise<void> {
+  ): Promise<string | null> {
     this._resumableStream.flushBuffer();
     const chunks = this._resumableStream.getStreamChunks(streamId);
-    if (chunks.length === 0) return;
+    if (chunks.length === 0) return null;
 
     // The accumulate loop and the `getMessage → update(merge) XOR append` upsert
     // are the shared `persistReconstructedOrphan` core. Think supplies the two
@@ -15938,14 +16020,21 @@ export class Think<
     // NOTE: progress is bumped at production/flush time in `_storeChunkDurably`
     // (#1637), NOT here — persisting on recovery or a client reconnect must not
     // be miscounted as new forward progress.
+    let persistedMessageId: string | null = null;
     const wrote = await persistReconstructedOrphan(chunks, {
       store: this._orphanStore(),
       fallbackId: crypto.randomUUID(),
       parentId,
-      prepare: (message) => this._strippedForPersist(message),
+      prepare: (message) => {
+        const prepared = this._strippedForPersist(message);
+        persistedMessageId = prepared?.id ?? null;
+        return prepared;
+      },
       merge: (_existing, incoming) => incoming
     });
-    if (wrote) this._broadcastMessages();
+    if (!wrote) return null;
+    this._broadcastMessages();
+    return persistedMessageId;
   }
 
   private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {

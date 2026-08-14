@@ -711,8 +711,10 @@ export class ThinkClientToolsAgent extends Think {
   private _responseLog: ChatResponseResult[] = [];
   private _lastTurnToolNames: string[] = [];
   private _textOnlyPromptRoles: string[][] = [];
+  private _liveMessageIdsAtTurnStart: string[][] = [];
   private _textOnlyOverflowAttemptsRemaining = 0;
   private _compactionHistoryMessageIds: string[][] = [];
+  private _failNextTurnBeforeStream = false;
 
   override classifyChatError = defaultContextOverflowClassifier;
 
@@ -733,6 +735,13 @@ export class ThinkClientToolsAgent extends Think {
 
   override beforeTurn(ctx: { tools: ToolSet }): void {
     this._lastTurnToolNames = Object.keys(ctx.tools);
+    this._liveMessageIdsAtTurnStart.push(
+      this.messages.map((message) => message.id)
+    );
+    if (this._failNextTurnBeforeStream) {
+      this._failNextTurnBeforeStream = false;
+      throw new Error("Test failure before stream creation");
+    }
   }
 
   async getLastTurnToolNames(): Promise<string[]> {
@@ -815,6 +824,15 @@ export class ThinkClientToolsAgent extends Think {
   /** Model prompt roles recorded by the text-only boundary implementation. */
   async getTextOnlyPromptRoles(): Promise<string[][]> {
     return this._textOnlyPromptRoles;
+  }
+
+  /** Active transcript IDs observed when each inference turn starts. */
+  async getLiveMessageIdsAtTurnStart(): Promise<string[][]> {
+    return this._liveMessageIdsAtTurnStart;
+  }
+
+  async failNextTurnBeforeStream(): Promise<void> {
+    this._failNextTurnBeforeStream = true;
   }
 
   /** Make the next text-only attempt overflow and enable compact-and-retry. */

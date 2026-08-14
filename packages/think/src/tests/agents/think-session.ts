@@ -4848,6 +4848,7 @@ export class ThinkToolsTestAgent extends Think {
       this as unknown as {
         _chatRecoveryContinue(d: {
           targetAssistantId?: string;
+          historyLeafId?: string;
           lastBody?: Record<string, unknown> | null;
           lastClientTools?: ClientToolSchema[] | null;
         }): Promise<void>;
@@ -4855,6 +4856,7 @@ export class ThinkToolsTestAgent extends Think {
     )._chatRecoveryContinue(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
+        historyLeafId?: string;
         lastBody?: Record<string, unknown> | null;
         lastClientTools?: ClientToolSchema[] | null;
       }
@@ -7642,6 +7644,7 @@ export class ThinkRecoveryTestAgent extends Think {
     await this._chatRecoveryContinue(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
+        historyLeafId?: string;
         lastBody?: Record<string, unknown> | null;
         lastClientTools?: ClientToolSchema[] | null;
       }

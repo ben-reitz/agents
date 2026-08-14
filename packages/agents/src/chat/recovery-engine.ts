@@ -296,6 +296,12 @@ export interface DispatchRecoveredTurnInput<TClassify> {
   recoveryRootRequestId: string;
   streamId: string;
   streamStatus?: ChatStreamStatus;
+  /**
+   * The exact assistant message materialized from the orphaned stream, or
+   * `null` when persistence was skipped or produced no message. Hosts that do
+   * not expose persistence outcomes also yield `null`.
+   */
+  persistedOrphanMessageId: string | null;
   /** The package-specific classification detail produced by `classifyRecoveredTurn`. */
   detail: TClassify;
 }
@@ -351,11 +357,15 @@ export interface ChatFiberWakeHooks<TClassify> {
   shouldPersistOrphanedPartial(
     input: PersistOrphanedPartialInput
   ): boolean | Promise<boolean>;
-  /** Materialize the orphaned stream's partial into a persisted assistant message. */
+  /**
+   * Materialize the orphaned stream's partial into a persisted assistant
+   * message. Return its exact id when the host exposes the persistence outcome;
+   * legacy or flat-history hosts may return `void`.
+   */
   persistOrphanedStream(
     streamId: string,
     snapshot: ChatFiberSnapshot | null
-  ): Promise<void>;
+  ): Promise<string | null | void>;
   /** Mark the (still-active) recovered stream complete and schedule cleanup. */
   completeRecoveredStream(streamId: string): void | Promise<void>;
   /**
@@ -501,6 +511,7 @@ export class ChatRecoveryEngine {
           createdAt: ctx.createdAt
         })) ?? {};
 
+      let persistedOrphanMessageId: string | null = null;
       if (
         await this._shouldPersistOrphanedPartial(wake, {
           streamId,
@@ -511,7 +522,13 @@ export class ChatRecoveryEngine {
           partial
         })
       ) {
-        await wake.persistOrphanedStream(streamId, snapshot);
+        const persistenceResult = await wake.persistOrphanedStream(
+          streamId,
+          snapshot
+        );
+        if (typeof persistenceResult === "string") {
+          persistedOrphanMessageId = persistenceResult;
+        }
       }
 
       if (streamStillActive) {
@@ -528,6 +545,7 @@ export class ChatRecoveryEngine {
         recoveryRootRequestId,
         streamId,
         streamStatus,
+        persistedOrphanMessageId,
         detail
       });
 
