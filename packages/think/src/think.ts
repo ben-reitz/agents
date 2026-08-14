@@ -15335,9 +15335,9 @@ export class Think<
         ? { leafId: data.historyLeafId }
         : undefined;
       const result = await this.continueLastTurn(undefined, {
-        ...(controller ? { signal: controller.signal } : {}),
+        signal: controller?.signal,
         trigger: "recovery-continue",
-        ...(history ? { history } : {})
+        history
       });
       await this._updateChatRecoveryIncident(
         data?.incidentId,
