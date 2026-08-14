@@ -12604,10 +12604,13 @@ export class Think<
   ): Promise<StreamResultStatus> {
     const clearGen = this._turnQueue.generation;
     const parentId = options?.parentId;
-    const streamId = this._startResumableStream(requestId, {
-      parentMessageId: parentId
-    });
     const continuation = options?.continuation ?? false;
+    // Persist continuation semantics with the chunk buffer so reconnect replay
+    // extends the existing assistant message exactly like the live frames.
+    const streamId = this._startResumableStream(requestId, {
+      parentMessageId: parentId,
+      continuation
+    });
 
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
@@ -15863,7 +15866,11 @@ export class Think<
    */
   protected _startResumableStream(
     requestId: string,
-    options?: { messageId?: string; parentMessageId?: string }
+    options?: {
+      messageId?: string;
+      parentMessageId?: string;
+      continuation?: boolean;
+    }
   ): string {
     const streamId = this._resumableStream.start(requestId, options);
     // Flush connections parked during this turn's pre-stream window (#1784)
