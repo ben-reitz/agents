@@ -1,0 +1,4 @@
+{
+  "name": "Cloudflare Agents SDK",
+  "install": "bash ./.cursor/install.sh"
+}
